@@ -374,6 +374,7 @@ int main(int argc, char* argv[]) {
 		return -1;
 	}
 
+	free(data_buf);
 	close(file);
 	return 0;
 }
