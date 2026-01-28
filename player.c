@@ -12,7 +12,7 @@ get things a little bit faster later using dynamic reading with mmap
 
 HOW TO COMPILE:
 
-gcc player.c -lasound
+gcc -o player player.c fd_handle.c sound_engine.c types.c cli_interface.c -lasound
 
 ALSA is the default sound layer on modern linux
 it exposes audio devices in /dev/snd/, but it's not

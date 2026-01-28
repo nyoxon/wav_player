@@ -109,29 +109,30 @@ int set_current_music(struct player_state* st, size_t index) {
 }
 
 void next_music(struct player_state* st) {
+	free(st->data_buf);
 	st->played++;
 
 	if (st->track_loop) {
-		st->cursor = 0;
-		return;
+		if (set_current_music(st, st->current_track) < 0) {
+			fprintf(stderr, "playing wav failed\n");
+			return;
+		}
 	}
 
 	if (st->current_track >= st->playlist.len - 1) {
 		if (st->playlist_loop) {
-			if (st->playlist.len == 1) {
-				st->cursor = 0;
-				return;
-			} else {
-				if (set_current_music(st, 0) < 0) {
-					fprintf(stderr, "playing wav failed\n");
-				}
-
-				return;
+			if (set_current_music(st, 0) < 0) {
+				fprintf(stderr, "playing wav failed\n");
 			}
+
+			free(st->data_buf);
+			return;
 		} else {
 			st->mode = COMMAND;
 			st->play_state = STOPPED;
 			st->cursor = 0;
+
+			return;
 		}
 	}
 
