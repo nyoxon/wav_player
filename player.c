@@ -1,6 +1,15 @@
 /*
 simple wav player using ALSA (Advance Linux Sound Architecture)
 
+INTRO:
+
+in this player, i'm copying to program memory all the relevant data information
+from the .wav that is actualy playing, which is not a great ideia
+for efficiency, but the ideia is to get used to this world, then 
+get things a little bit faster later using dynamic reading with mmap
+
+
+
 HOW TO COMPILE:
 
 gcc player.c -lasound
@@ -95,287 +104,117 @@ snd_strerror(int err) -> converts ALSA error codes to human readable format
 
 */
 
-#include <stdint.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <stdio.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <string.h>
-#include <alsa/asoundlib.h>
+#include "types.h"
+#include "fd_handle.h"
+#include "sound_engine.h"
+#include "cli_interface.h"
 
-#define ECHO_FILE_NAME "echo.wav"
+volatile sig_atomic_t should_exit = 0;
 
-struct riff_header {
-	char chunk_id[4]; // "RIFF"
-	uint32_t chunk_size; // file_size - 8 bytes
-	char format[4]; // "WAVE"
-}__attribute__((packed));
-
-void print_riff_header(const struct riff_header* rhdr) {
-	printf("	--- RIFF HEADER --- 	\n");
-	printf("chunk_id: %.4s\n", rhdr->chunk_id);
-	printf("chunk_size: %d\n", rhdr->chunk_size);
-	printf("format: %.4s\n\n", rhdr->format);
+void handle_signal(int sig) {
+	(void) sig;
+	should_exit = 1;
 }
 
-struct fmt_sub_chunk {
-	char subchunk1_id[4]; // "fmt "
-	uint32_t subchunk1_size; // chunk size - 8 bytes (here, 16 bytes)
-	uint16_t audio_format; // (1: PCM integer, 3: IEEE 754 float)
-	uint16_t num_channels; // mono/stereo
-	uint32_t sample_rate; // sample rate in hz
-	uint32_t byte_rate; // bytes to read per sec (sample_rate * byte_align)
-	uint16_t byte_align; // bytes per block (num_channels * bits_per_sample)
-	uint16_t bits_per_sample; // bits per sample
-}__attribute__((packed));
+void add_track(const char* path, const char* fullname, void* userdata) {
+	struct player_state* st = (struct player_state*) userdata;
 
-void print_fmt_sub_chunk(const struct fmt_sub_chunk* fmt) {
-	printf("	--- FMT SUB CHUNK --- 	\n");
-	printf("subchunk1_id: %.4s\n", fmt->subchunk1_id);
-	printf("subchunk1_size: %d\n", fmt->subchunk1_size);
-	printf("audio_format: %u\n", fmt->audio_format);
-	printf("num_channels: %u\n", fmt->num_channels);
-	printf("sample_rate: %d\n", fmt->sample_rate);
-	printf("byte_rate: %d\n", fmt->byte_rate);
-	printf("byte_align: %u\n", fmt->byte_align);
-	printf("bits_per_sample: %u\n\n", fmt->bits_per_sample);
-}
-
-struct data_sub_chunk {
-	char subchunk2_id[4]; // "data"
-	uint32_t subchunk2_size; // sampled_data size
-	// sampled_data
-}__attribute__((packed));
-
-void print_data_sub_chunk(const struct data_sub_chunk* data) {
-	printf("	--- DATA SUB CHUNK --- 	\n");
-	printf("subchunk2_id: %.4s\n", data->subchunk2_id);
-	printf("subchunk2_size: %d\n\n", data->subchunk2_size);
-}
-
-struct chunk_header {
-	char id[4];
-	uint32_t size;
-}__attribute__((packed));
-
-ssize_t read_bytes_from_file(int fd, void* buf, size_t size) {
-	ssize_t total_read = 0;;
-	ssize_t n;
-
-	while (total_read < size) {
-		n = read(fd, buf + total_read, size - total_read);
-
-		if (n < 0) {
-			perror("read");
-			break;
-		}
-
-		if (n == 0) {
-			break;
-		}
-
-		total_read += n;
+	if (!st) {
+		return;
 	}
 
-	return total_read;
-}
+	struct track t;
+	t.path = strdup(path);
+	t.name = strdup(fullname);
 
-ssize_t write_bytes_to_file(int fd, const void* buf, size_t size) {
-	ssize_t total_written = 0;
-	ssize_t n;
+	struct fmt_sub_chunk fmt;
+	struct data_sub_chunk data;
 
-	while (total_written < size) {
-		ssize_t n = write(fd, 
-			(const char*) buf +  total_written, size - total_written);
+	int file = read_wav_from_filename(path,
+		NULL, &fmt, &data, NULL, NULL, NULL);
 
-		if (n <= 0) {
-			perror("write");
-			break;
-		}
-
-		total_written += n;
+	if (file < 0) {
+		fprintf(stderr, "reading wav failed\n");
+		return;
 	}
 
-	return total_written;
+	close(file);
+
+	double duration = (double) (data.subchunk2_size / fmt.byte_rate);
+	t.duration = duration;
+
+	if (playlist_push(&st->playlist, t) < 0) {
+		if (st->playlist.len > 0) {
+			playlist_free(&st->playlist);
+
+			free(t.path);
+			free(t.name);
+		}
+	}
 }
 
-int read_data_chunk
+void create_playlist(const char* path, int recursive, struct player_state* st) {
+	playlist_init(&st->playlist);
+	list_wavs(path, recursive, add_track, st);
+}
+
+int init
 (
-	int fd, 
-	struct data_sub_chunk* data, 
-	uint8_t** buf, 
-	size_t* buf_len
+	const char* path,
+	int recursive, 
+	struct player_state *st
 ) 
 {
-	struct chunk_header chunk = {0};
-
-	while (read(fd, &chunk, sizeof(struct chunk_header)) == sizeof(struct chunk_header)) {
-		if (strncmp(chunk.id, "data", 4) == 0) {
-			memcpy(data->subchunk2_id, chunk.id, 4);
-			data->subchunk2_size = chunk.size;
-
-			*buf = malloc(chunk.size);
-
-			if (!*buf) {
-				perror("malloc");
-				return -1;
-			}
-
-			ssize_t n = read_bytes_from_file(fd, *buf, chunk.size);
-
-			if (n != chunk.size) {
-				free(*buf);
-				return -1;
-			}
-
-			*buf_len = (size_t) n;
-
-			return 0;
-		} else {
-			if (lseek(fd, chunk.size, SEEK_CUR) == -1) {
-				perror("lseek");
-				return -1;
-			}
-		}
-	}
-
-	return -1;
-}
-
-int echo_wav
-(
-	const struct riff_header* riff,
-	const struct fmt_sub_chunk* fmt,
-	const struct data_sub_chunk* data,
-	const uint8_t* data_buf,
-	size_t buf_len
-)
-{
-	int fd = open(ECHO_FILE_NAME, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-
-	if (fd < 0) {
-		perror("open");
+	if (!st) {
+		fprintf(stderr, "st is NULL\n");
 		return -1;
 	}
 
-	if (write_bytes_to_file(fd, riff, sizeof(struct riff_header)) < sizeof(struct riff_header)) {
-		perror("write riff");
-		return -1;
-	}
+	st->running = 1;
+	st->playlist_loop = 0;
+	st->track_loop = 0;
+	st->played = 0;
+	st->mode = COMMAND;
+	st->play_state = STOPPED;
 
-	if (write_bytes_to_file(fd, fmt, sizeof(struct fmt_sub_chunk)) < sizeof(struct fmt_sub_chunk)) {
-		perror("write fmt");
-		return -1;
-	}
 
-	if (write_bytes_to_file(fd, data, sizeof(struct data_sub_chunk)) < sizeof(struct data_sub_chunk)) {
-		perror("write data");
-		return -1;
-	}
+	create_playlist(path, recursive, st);
+	st->current_track = 0;
+	st->cursor = 0;
 
-	if (write_bytes_to_file(fd, data_buf, buf_len) < buf_len) {
-		perror("write data buf");
-		return -1;
-	}
-
-	close(fd);
-	return 0;
-}
-
-int play_wav
-(
-	const uint8_t* data_buf,
-	size_t buf_len,
-	const struct fmt_sub_chunk* fmt
-) 
-{
-	snd_pcm_t* handle;
-	int err;
-
-	if ((err == snd_pcm_open(&handle, "default", SND_PCM_STREAM_PLAYBACK, 0)) < 0) {
-		return -1;
-	}
-
-	snd_pcm_set_params(handle,
-		SND_PCM_FORMAT_S16_LE,
-		SND_PCM_ACCESS_RW_INTERLEAVED,
-		fmt->num_channels,
-		fmt->sample_rate,
-		1, // allows resampling software
-		500000 // latency (ms)
-	);
-
-	snd_pcm_writei(handle,
-		data_buf, buf_len / (fmt->num_channels * fmt->bits_per_sample / 8));
-
-	snd_pcm_drain(handle);
-	snd_pcm_close(handle);
+	st->pcm = NULL;
 
 	return 0;
 }
 
-int main(int argc, char* argv[]) {
-	if (argc != 2) {
-		fprintf(stderr, "usage: %s [WAV FILE]\n", argv[0]);
-		return -1;
-	}
+int main(void) {
+	struct sigaction sa = {0};
+	sa.sa_handler = handle_signal;
+	sigemptyset(&sa.sa_mask);
+
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
 
 	// --- READING .WAV ---
 
-	char* file_name = argv[1];
+	const char path[PATH_MAX_LENGTH] = "."; 
+	int recursive = 1;
+	struct player_state st = {0};
 
-	int file = open(file_name, O_RDONLY | O_CREAT, 0644);
+	int file = init(path, recursive, &st);
 
 	if (file < 0) {
-		perror("open");
+		fprintf(stderr, "reading wav failed\n");
 		return -1;
 	}
 
-	struct riff_header riff = {0};
-	struct fmt_sub_chunk fmt = {0};
-	struct data_sub_chunk data = {0};
-
-	ssize_t n = read_bytes_from_file(file, &riff, sizeof(struct riff_header));
-
-	if (n != sizeof(struct riff_header)) {
-		close(file);
-		return -1;
+	while (should_exit == 0 && st.running == 1) {
+		command_loop(&st, &should_exit);
+		player_loop(&st, &should_exit);
 	}
 
-	n = read_bytes_from_file(file, &fmt, sizeof(struct fmt_sub_chunk));
+	playlist_free(&st.playlist);
 
-	if (n != sizeof(struct fmt_sub_chunk)) {
-		close(file);
-		return -1;
-	}
-
-	uint8_t* data_buf;
-	size_t buf_len;
-	int ret = read_data_chunk(file, &data, &data_buf, &buf_len);
-
-	if (ret < 0) {
-		close(file);
-		return -1;
-	}
-
-	print_riff_header(&riff);
-	print_fmt_sub_chunk(&fmt);
-	print_data_sub_chunk(&data);
-
-	// --- PLAYING .WAV ---
-
-	int err = play_wav(data_buf, buf_len, &fmt);
-
-	if (err < 0) {
-		fprintf(stderr, "error opening device: %s\n", snd_strerror(err));
-		free(data_buf);
-		close(file);
-		return -1;
-	}
-
-	free(data_buf);
-	close(file);
 	return 0;
 }
 
