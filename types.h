@@ -67,6 +67,8 @@ enum play_state {
 
 struct player_state {
 	int running; // controls main loop
+	char dir_path[PATH_MAX_LENGTH]; // path of the current directory
+	int recursive; // read directory recursively
 	int playlist_loop; // playlist will play on loop
 	int track_loop; // track will play on loop
 	size_t played; // how many tracks were played
@@ -77,11 +79,12 @@ struct player_state {
 	struct playlist playlist; // list of tracks
 	size_t current_track; // number of tracks
 	size_t cursor;
-
-	uint8_t* data_buf; // audio data that has been read using read_data_buf
-	size_t buf_len; // size of data_buf
+	float player_gain;
 
 	snd_pcm_t *pcm;
+	int32_t* pcm_buf; // audio data that has been read using read_data_buf
+	size_t buf_len; // size of data_buf
+	size_t pcm_frames;
 	struct fmt_sub_chunk fmt;
 };
 

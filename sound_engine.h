@@ -15,4 +15,7 @@ int play_wav
 
 int play_wav_player_tick(struct player_state* st);
 
+int convert_wav_to_32(struct player_state** st, const uint8_t* data_buf);
+void apply_volume(struct player_state** st);
+
 #endif

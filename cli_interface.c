@@ -100,8 +100,18 @@ int set_current_music(struct player_state* st, size_t index) {
 	}
 
 	st->fmt = fmt;
-	st->data_buf = data_buf;
 	st->buf_len = buf_len;
+
+	// if st->pcm_buf is a valid pointer, then data_buf is not
+	if (convert_wav_to_32(&st, data_buf) < 0) {
+		free(data_buf);
+		return -1;
+	}
+
+	apply_volume(&st);
+
+	free(data_buf);
+
 	st->current_track = index;
 	st->cursor = 0;
 
@@ -109,15 +119,14 @@ int set_current_music(struct player_state* st, size_t index) {
 }
 
 void next_music(struct player_state* st) {
-	free(st->data_buf);
-	st->played++;
-
 	if (st->track_loop) {
-		if (set_current_music(st, st->current_track) < 0) {
-			fprintf(stderr, "playing wav failed\n");
-			return;
-		}
+		st->cursor = 0;
+		return;
+	} else if (st->pcm_buf) {
+		free(st->pcm_buf);
 	}
+
+	st->played++;
 
 	if (st->current_track >= st->playlist.len - 1) {
 		if (st->playlist_loop) {
@@ -125,12 +134,12 @@ void next_music(struct player_state* st) {
 				fprintf(stderr, "playing wav failed\n");
 			}
 
-			free(st->data_buf);
 			return;
 		} else {
 			st->mode = COMMAND;
 			st->play_state = STOPPED;
 			st->cursor = 0;
+			audio_shutdown(st);
 
 			return;
 		}
@@ -140,18 +149,52 @@ void next_music(struct player_state* st) {
 		fprintf(stderr, "playing wav failed\n");
 		st->mode = COMMAND;
 		st->play_state = STOPPED;
+		audio_shutdown(st);
 	}
 }
 
 void print_help() {
-	printf("\ncommands:\n\n");
+	printf("\033[H\033[J");
+	printf("commands for command mode:\n\n");
 	printf("(play number_track) -> play track of number number_track\n");
 	printf("(play) -> (play 0)\n");
 	printf("(list) -> list all wav files\n");
 	printf("(loop) -> enable/disable playlist loop\n");
+	printf("(volume percent) -> change volume\n");
+	printf("(clear) -> clean the terminal\n");
 	printf("(help) -> list all possible commands\n");
+	printf("(about) -> about the program\n");
 	printf("(quit) -> quit the program\n\n");
 	printf("if you add a new WAV in the directory, restart the program\n");
+	printf("volume must be altered only in command mode\n\n");
+	printf("you don't need to write (command) inside the parentheses\n");
+	printf("the use in here is just a way to distinguish a command from a normal text\n\n");
+}
+
+void print_about() {
+	printf("\033[H\033[J");
+	printf("	--- ABOUT ---\n\n");
+	printf("this is a simple wav player written in C and using ALSA\n\n");
+	printf("it is currently inefficient in memory,\n");
+	printf("because to read a .wav it is necessary to copy\n");
+	printf("all the memory of the file into the program's\n");
+	printf("memory before instead of reading the data on demand\n\n");
+	printf("in this player you can play a list of.wav files\n");
+	printf("within a directory (recursively if you enable this option)\n\n");
+	printf("a file is identified as .wav only by its name, which means\n");
+	printf("that the program does not perform a security check to ensure\n");
+	printf("that a file with a .wav name is in fact a .wav\n\n");
+	printf("	--- OPERATION MODES ---	 \n\n");
+	printf("Command mode:\n");
+	printf("it's the mode you're in right now, where you set\n");
+	printf("certain settings like playlistloop or volume (yes, the volume\n");
+	printf("should be set here and not while a .wav is playing) and dictate\n");
+	printf("specific commands for specific needs\n\n");
+	printf("Player mode:\n");
+	printf("this is the mode you find yourself in while a .wav\n");
+	printf("s playing. in it there is some information about the current track\n");
+	printf("a progress bar tha t updates at a constant rate and a list of\n");
+	printf("commands (simpler to write) that you can write to get specific results\n\n");
 }
 
 void process_command_input(char* line, struct player_state* st) {
@@ -165,8 +208,14 @@ void process_command_input(char* line, struct player_state* st) {
 	} else if (strncmp(cmd, "help", 4) == 0) {
 		print_help();
 	} else if (strncmp(cmd, "list", 4) == 0) {
+		printf("current directory: %s (recursive=%d)\n\n",
+		 st->dir_path, st->recursive);
 		playlist_print(&st->playlist);
 	} else if (strncmp(cmd, "play", 4) == 0) {
+		if (st->playlist.len == 0) {
+			printf("current playlist is empty\n\n");
+			return;
+		}
 		if (count == 1) {
 			if (set_current_music(st, 0) < 0) {
 				fprintf(stderr, "playing wav failed\n");
@@ -196,6 +245,19 @@ void process_command_input(char* line, struct player_state* st) {
 		} else {
 			printf("playlistloop: disabled\n");
 		}
+	} else if (strcmp(cmd, "volume") == 0) {
+		if (count == 2) {
+			if (flag < 0.0 || flag >= 200.0) {
+				fprintf(stderr, "invalid volume: %.2f\n", flag);
+				return;
+			}
+
+			st->player_gain = flag / 100.0;
+		}
+	} else if (strcmp(cmd, "clear") == 0) {
+		printf("\033[H\033[J");		
+	} else if(strcmp(cmd, "about") == 0) {
+		print_about();
 	} else if (*cmd) {
 		printf("\ninvalid command: %s\n", cmd);
 		printf("(help) for possible commands\n");
@@ -206,6 +268,8 @@ void command_loop(struct player_state* st, volatile sig_atomic_t* should_exit) {
 	char line[256];
 	int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
 	fcntl(STDIN_FILENO, F_SETFL, flags & ~O_NONBLOCK);
+	printf("\033[H\033[J");
+	printf("COMMAND MODE (help for list of commands)\n\n");
 
 	while (st->running && (st->mode == COMMAND)) {
 		if (*should_exit) {
@@ -238,6 +302,8 @@ static void process_key(struct player_state* st, char c) {
 	if (c == 'q') {
 		st->mode = COMMAND;
 		st->play_state = STOPPED;
+		free(st->pcm_buf);
+		audio_shutdown(st);
 		return;
 	}
 
@@ -253,7 +319,7 @@ static void render_progress_bar(struct player_state* st, int width) {
 	}
 
 	size_t current = st->cursor;
-	size_t total = st->buf_len;
+	size_t total = st->pcm_frames;
 
 	float ratio = (float) current / (float) total;
 
@@ -283,6 +349,7 @@ static void render_ui(struct player_state* st) {
 		struct track* t = get_current_music(st);
 		printf("current track [%d/%d]: %s\n",
 			st->current_track + 1, st->playlist.len, t->name);
+		printf("volume: %.1f%\n", st->player_gain * 100.0);
 
 		if (st->track_loop) {
 			printf("looptrack: enabled\n");
@@ -320,6 +387,11 @@ void player_loop(struct player_state* st, volatile sig_atomic_t* should_exit) {
 	while (st->running && (st->mode == PLAYER)) {
 		if (*should_exit) {
 			st->running = 0;
+
+			if (st->mode == PLAYER) {
+				audio_shutdown(st);
+				free(st->pcm_buf);
+			}
 		}
 
 		process_player_input(st);

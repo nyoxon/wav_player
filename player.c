@@ -108,6 +108,7 @@ snd_strerror(int err) -> converts ALSA error codes to human readable format
 #include "fd_handle.h"
 #include "sound_engine.h"
 #include "cli_interface.h"
+#include <string.h>
 
 volatile sig_atomic_t should_exit = 0;
 
@@ -171,14 +172,17 @@ int init
 	}
 
 	st->running = 1;
+	snprintf(st->dir_path, PATH_MAX_LENGTH, "%s", path);
+	st->recursive = recursive;
 	st->playlist_loop = 0;
 	st->track_loop = 0;
 	st->played = 0;
 	st->mode = COMMAND;
 	st->play_state = STOPPED;
+	st->player_gain = 1.0; // default
+	st->played = 0;
 
-
-	create_playlist(path, recursive, st);
+	create_playlist(st->dir_path, recursive, st);
 	st->current_track = 0;
 	st->cursor = 0;
 
@@ -187,7 +191,7 @@ int init
 	return 0;
 }
 
-int main(void) {
+int main(int argc, const char* argv[]) {
 	struct sigaction sa = {0};
 	sa.sa_handler = handle_signal;
 	sigemptyset(&sa.sa_mask);
@@ -196,15 +200,31 @@ int main(void) {
 	sigaction(SIGTERM, &sa, NULL);
 
 	// --- READING .WAV ---
-
-	const char path[PATH_MAX_LENGTH] = "."; 
+	char path[PATH_MAX_LENGTH];
 	int recursive = 1;
+
+	if (argc == 1) {
+		snprintf(path, PATH_MAX_LENGTH, "%s", ".");
+	} else if (argc == 2) {
+		snprintf(path, PATH_MAX_LENGTH, "%s", argv[1]);
+	} else if (argc == 3) {
+		snprintf(path, PATH_MAX_LENGTH, "%s", argv[1]);
+		recursive = atoi(argv[2]);
+	} else {
+		printf("usage: %s [PATH] [RECURSIVE]\n", argv[0]);
+		printf("if [PATH] (relative or global) is omitted, then the directory\n");
+		printf("that will be used by the player will be the current directory ./\n");
+		printf("[RECURSIVE] must be 1 if you want the program to read the\n");
+		printf("directory recursively (default) or 0 otherwise\n");
+		return -1;
+	}
+
 	struct player_state st = {0};
 
-	int file = init(path, recursive, &st);
+	int ret = init(path, recursive, &st);
 
-	if (file < 0) {
-		fprintf(stderr, "reading wav failed\n");
+	if (ret < 0) {
+		fprintf(stderr, "reading dir failed\n");
 		return -1;
 	}
 
